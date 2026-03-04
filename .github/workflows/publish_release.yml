@@ -1,82 +1,87 @@
-  name: Publish Component Release
+name: Publish Component Release
 
-  on:
-    repository_dispatch:
-      types: [component-release]
+on:
+  repository_dispatch:
+    types: [component-release]
 
-  permissions:
-    contents: write
+permissions:
+  contents: write
 
-  concurrency:
-    group: publish
-    cancel-in-progress: false
+concurrency:
+  group: publish-release
+  cancel-in-progress: false
 
-  jobs:
-    publish:
-      runs-on: ubuntu-latest
-      steps:
-        - name: Checkout
-          uses: actions/checkout@v4
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-        - name: Download artifact from source repo
-          uses: actions/download-artifact@v4
-          with:
-            name: ${{ github.event.client_payload.component }}-${{ github.event.client_payload.version }}-arm64
-            github-token: ${{ secrets.SOURCE_REPOS_TOKEN }}
-            repository: ${{ github.event.client_payload.source_repo }}
-            run-id: ${{ github.event.client_payload.run_id }}
+      - name: Download artifact from source repo
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ github.event.client_payload.component }}-${{ github.event.client_payload.version }}-arm64
+          github-token: ${{ secrets.SOURCE_REPOS_TOKEN }}
+          repository: ${{ github.event.client_payload.source_repo }}
+          run-id: ${{ github.event.client_payload.run_id }}
 
-        - name: Download current manifest
-          env:
-            GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          run: |
-            gh release download latest -p "version-manifest.json" 2>/dev/null || \
-              echo '{"schema_version":1,"components":{}}' > version-manifest.json
+      - name: Download existing release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p existing
+          gh release download latest -D existing 2>/dev/null || true
 
-        - name: Update manifest
-          run: |
-            python3 -c "
-            import json
-            from datetime import datetime, timezone
-            m = json.load(open('version-manifest.json'))
-            m['updated_at'] = datetime.now(timezone.utc).isoformat()
-            m['components']['${{ github.event.client_payload.component }}'] = {
-                'version': '${{ github.event.client_payload.version }}',
-                'artifact': '${{ github.event.client_payload.component }}-${{ github.event.client_payload.version}}-arm64.tar.gz',
-                'sha256': '${{ github.event.client_payload.sha256 }}',
-                'install_script': 'install.sh'
-            }
-            json.dump(m, open('version-manifest.json', 'w'), indent=2)
-            "
-            cat version-manifest.json
+      - name: Update pi manifest
+        run: |
+          # Use pi-manifest.json; migrate from version-manifest.json if needed
+          if [ -f existing/pi-manifest.json ]; then
+            cp existing/pi-manifest.json pi-manifest.json
+          elif [ -f existing/version-manifest.json ]; then
+            cp existing/version-manifest.json pi-manifest.json
+          else
+            echo '{"schema_version":1,"components":{}}' > pi-manifest.json
+          fi
 
-        - name: Download existing artifacts
-          env:
-            GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          run: |
-            mkdir -p existing
-            gh release download latest -D existing 2>/dev/null || true
-            # Remove old version of the component being updated
-            rm -f existing/${{ github.event.client_payload.component }}-*-arm64.tar.gz
-            rm -f existing/version-manifest.json
+          python3 -c "
+          import json
+          from datetime import datetime, timezone
+          m = json.load(open('pi-manifest.json'))
+          m['updated_at'] = datetime.now(timezone.utc).isoformat()
+          m['components']['${{ github.event.client_payload.component }}'] = {
+              'version': '${{ github.event.client_payload.version }}',
+              'artifact': '${{ github.event.client_payload.component }}-${{ github.event.client_payload.version}}-arm64.tar.gz',
+              'sha256': '${{ github.event.client_payload.sha256 }}',
+              'install_script': 'install.sh'
+          }
+          json.dump(m, open('pi-manifest.json', 'w'), indent=2)
+          "
+          echo "Updated pi-manifest.json:"
+          cat pi-manifest.json
 
-        - name: Publish release
-          env:
-            GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          run: |
-            # Delete old latest release
-            gh release delete latest --yes 2>/dev/null || true
-            git tag -d latest 2>/dev/null || true
-            git push origin :refs/tags/latest 2>/dev/null || true
+      - name: Republish latest release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Remove old manifests and old version of this component from existing
+          rm -f existing/pi-manifest.json
+          rm -f existing/version-manifest.json
+          rm -f existing/${{ github.event.client_payload.component }}-*-arm64.tar.gz
 
-            # Collect all artifacts
-            ASSETS=(version-manifest.json)
-            for f in existing/*-arm64.tar.gz; do
-              [ -f "$f" ] && ASSETS+=("$f")
-            done
-            ASSETS+=(${{ github.event.client_payload.component }}-${{ github.event.client_payload.version}}-arm64.tar.gz)
+          # Delete old latest release
+          gh release delete latest --yes 2>/dev/null || true
+          git tag -d latest 2>/dev/null || true
+          git push origin :refs/tags/latest 2>/dev/null || true
 
-            gh release create latest \
-              --title "MIRA Platform Latest Release" \
-              --notes "Updated: $(date -Iseconds)" \
-              "${ASSETS[@]}"
+          # Collect all assets: new pi-manifest + all remaining existing + new artifact
+          ASSETS=(pi-manifest.json)
+          for f in existing/*; do
+            [ -f "$f" ] && ASSETS+=("$f")
+          done
+          ASSETS+=(${{ github.event.client_payload.component }}-${{ github.event.client_payload.version}}-arm64.tar.gz)
+
+          gh release create latest \
+            --title "MIRA Platform Latest Release" \
+            --notes "Updated: $(date -Iseconds)" \
+            "${ASSETS[@]}"
