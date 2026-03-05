@@ -81,6 +81,6 @@ jobs:
           ASSETS+=(${{ github.event.client_payload.component }}-${{ github.event.client_payload.version }}.apk)
 
           gh release create latest \
-            --title "MIRA Platform Latest Release" \
+            --title "Latest Deployments" \
             --notes "Updated: $(date -Iseconds)" \
             "${ASSETS[@]}"
